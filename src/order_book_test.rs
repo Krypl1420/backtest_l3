@@ -7,7 +7,7 @@ use crate::{order_book::{MBOMsg, OrderBook}, types::{Action, Side}};
 #[should_panic(expected = "cant add order with side None")]
 fn order_book_apply_add_side_is_none_panics() {
     let mut order_book = OrderBook::new();
-    let add_msg = MBOMsg{
+    let none_side_msg = MBOMsg{
         ts_event: 1,
         instrument_id: 2,
         action: Action::Add,
@@ -18,7 +18,7 @@ fn order_book_apply_add_side_is_none_panics() {
         flags: 3,
         sequence: 1,
     };
-    order_book.apply_event(&add_msg);
+    order_book.apply_event(&none_side_msg);
 }
 
 #[test]
@@ -60,6 +60,56 @@ fn order_book_apply_add() {
     assert_eq!(order_book.asks.len(), 1, "asks should have one entry after add");
     assert_eq!(order_book.bids.len(), 0, "bids should be empty after add");
     assert_eq!(order_book.order_refs.get(&12).unwrap().clone(), (Side::Ask, 10000), "order_refs should contain the added order");
+}
+
+#[test]
+fn order_book_apply_add_lost_priority() {
+    let mut order_book = OrderBook::new();
+    let add_msgs = [MBOMsg{
+        ts_event: 1,
+        instrument_id: 2,
+        action: Action::Add,
+        side: Side::Ask,
+        price: 10000,
+        quantity: 10,
+        order_id: 1,
+        flags: 3,
+        sequence: 1,
+    },
+    MBOMsg{
+        ts_event: 2,
+        instrument_id: 2,
+        action: Action::Add,
+        side: Side::Ask,
+        price: 10000,
+        quantity: 20,
+        order_id: 2,
+        flags: 3,
+        sequence: 2,
+    }];
+    for msg in add_msgs {
+        order_book.apply_event(&msg);
+    }
+    let modify_msg = MBOMsg{
+            ts_event: 1,
+            instrument_id: 2,
+            action: Action::Add,
+            side: Side::Ask,
+            price: 10000,
+            quantity: 20,
+            order_id: 1,
+            flags: 3,
+            sequence: 1,
+    };
+    order_book.apply_event(&modify_msg);
+    assert_eq!(order_book.asks.get(&10000).unwrap().orders.iter().position(|o| o.id == 1).unwrap(), 1);
+    assert_eq!(order_book.asks.get(&10000).unwrap().orders.iter().position(|o| o.id == 2).unwrap(), 0);
+    let modify_msg_kept_priority = MBOMsg{
+        ts_event: 1,
+        instrument_id: 2,
+
+    }
+    order_book.apply_event(event);
 }
 
 #[test]
@@ -143,11 +193,6 @@ fn order_book_apply_modify() {
     assert_eq!(order_book.order_refs.get(&12).copied(), Some((Side::Ask, 20000)));
     assert_eq!(order_book.order_refs.len(), 1);
     assert_matches!(order_book.asks.get(&10000), None);
-    let mdf_msg2 = MBOMsg{
-        quantity: 10,
-        ..mdf_msg
-    };
-    order_book.
 }
 
 #[test]

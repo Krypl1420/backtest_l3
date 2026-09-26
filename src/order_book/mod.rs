@@ -12,7 +12,7 @@ const DISPLAY_WIDTH: usize = 80;
 
 #[derive(Debug)]
 pub struct PriceLevel {
-    orders: Vec<Order>,
+    pub orders: Vec<Order>,
     total_qty: Quantity,
 }
 
