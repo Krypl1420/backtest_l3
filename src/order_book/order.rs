@@ -11,6 +11,12 @@ pub struct Order {
     pub qty: Quantity,
 }
 
+pub enum Priority {
+    Kept,
+    LostPrice,
+    LostSize
+}
+
 impl Order {
     pub fn new(id: OrderId, ts: Timestamp, side: Side, price: Price, qty: Quantity) -> Self {
         Self {
@@ -31,8 +37,13 @@ impl Order {
             qty: event.size,
         }
     }
-    pub fn loses_priority(&self, new_price: Price, new_qty: Quantity) -> bool {
-        return self.price != new_price || self.qty < new_qty;
+    pub fn loses_priority(&self, new_price: Price, new_qty: Quantity) -> Priority {
+        if self.price != new_price {
+            return Priority::LostPrice;
+        } else if new_qty > self.qty {
+            return Priority::LostSize;
+        }
+        Priority::Kept
     }
 }
 

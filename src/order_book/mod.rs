@@ -1,12 +1,11 @@
 pub mod order;
+use crate::order_book::order::Priority;
 pub use crate::types::{OrderId, Price, Quantity, Side, Timestamp};
 use dbn::{BidAskPair, MboMsg, Mbp10Msg};
 pub use order::Order;
 
-use crate::types::Action;
-use std::assert_matches;
-use std::backtrace::Backtrace;
 use std::cmp::Reverse;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Write};
 use std::mem::replace;
@@ -19,6 +18,7 @@ pub enum BookError {
     OrderIndexNotFound(usize),
     DuplicateOrderId(OrderId),
     EnteringSideNone,
+    LevelNotFound(Side, Price)
 }
 
 impl std::fmt::Display for BookError {
@@ -28,11 +28,19 @@ impl std::fmt::Display for BookError {
             Self::OrderIndexNotFound(pos) => write!(f, "order at index {pos} not found"),
             Self::DuplicateOrderId(id) => write!(f, "duplicate order id {id:?}"),
             Self::EnteringSideNone => write!(f, "entering side is none"),
+            Self::LevelNotFound(side, price) => write!(f, "price level side: {side:?} price: {price:?} not found")
         }
     }
 }
 
 impl std::error::Error for BookError {}
+
+#[derive(Debug)]
+
+enum HalfBook {
+    Ask(BTreeMap<Price, PriceLevel>),
+    Bid(BTreeMap<Reverse<Price>, PriceLevel>),
+}
 
 #[derive(Debug)]
 pub struct PriceLevel {
@@ -132,143 +140,83 @@ impl OrderBook {
         }
     }
 
-    pub fn apply_event(&mut self, event: &MboMsg) -> Result<Option<Order>, BookError> {
-        let side = event.side().unwrap();
-        let action = event.action().unwrap();
-        if event.price == dbn::UNDEF_PRICE && event.flags.is_tob() {
-            match side {
+    pub fn apply_event(&mut self, mbo: &MboMsg) -> Result<Option<Order>, BookError> {
+        todo!()
+    }
+
+
+    fn add(&mut self, mbo: &MboMsg) -> Result<(), BookError> {
+        if mbo.flags.is_tob() {
+            match mbo.side().unwrap() {
                 Side::Ask => {
                     self.asks.clear();
-                    return Ok(None);
-                }
+                    self.asks.entry(mbo.price).or_default().add(Order::from_event(mbo));
+                },
                 Side::Bid => {
                     self.bids.clear();
-                    return Ok(None);
-                }
-                Side::None => return Err(BookError::EnteringSideNone)
-            }
-
+                    self.bids.entry(Reverse(mbo.price)).or_default().add(Order::from_event(mbo));
+                },
+                Side::None => return Err(BookError::EnteringSideNone),
+            };
+        } else {
+            let old_ref = self.order_refs.insert(mbo.order_id, (mbo.side().unwrap(), mbo.price));
+            assert_eq!(old_ref, None); // this assertion is bulshit
+            let level = self.get_mut_level(mbo.side().unwrap(), mbo.price)?;
+            level.orders.push(Order::from_event(mbo));
         }
-        let removed = match action {
-            Action::Add => {
-                self.add(Order::from_event(event))?;
-                None
-            }
-            Action::Modify => {
-                self.modify(
-                    event.order_id,
-                    event.hd.ts_event,
-                    side,
-                    event.price,
-                    event.size,
-                )?;
-                None
-            }
-            Action::Cancel => Some(self.cancel(event.order_id)?),
-            Action::Clear => {
-                self.clear();
-                None
-            }
-            Action::Trade => {
-                self.update_last(event.price, event.size);
-                None
-            }
-            Action::Fill | Action::None => None,
+        Ok(())
+    }
+
+    fn modify(&mut self, mbo: &MboMsg) -> Result<(), BookError> {
+        let Some(&(order_side, order_price)) = self.order_refs.get(&mbo.order_id) else {
+            return self.add(&mbo);
         };
-        self.last_msg = event.clone();
-        Ok(removed)
+        assert_eq!(order_side, mbo.side().unwrap());
+        let level = self.get_mut_level(order_side, order_price).unwrap();
+        let order_idx = level.orders.iter().position(|o| o.id == mbo.order_id).ok_or_else(|| BookError::OrderIdNotFound(mbo.order_id))?;
+        let order = level.orders.get_mut(order_idx).unwrap();
+        order.price = mbo.price;
+        order.qty = mbo.size;
+
+        match order.loses_priority(mbo.price, mbo.size) {
+            Priority::LostPrice => {
+                let order = level.remove_idx(order_idx).unwrap();
+                if level.is_empty() {
+                    self.delete_level(order_side, order_price).unwrap();
+                }
+                let new_level = self.get_mut_level(mbo.side().unwrap(), mbo.price)?;
+                new_level.add(order);
+            }
+            Priority::LostSize => {
+                level.modify_idx(order_idx, mbo.size).unwrap();
+            },
+            Priority::Kept => ()
+        }
+        Ok(())
+    }
+
+    fn cancel(&mut self, mbo: &MboMsg) -> Result<Order, BookError> {
+        todo!()
+    }
+
+    fn get_mut_level(&mut self, side: Side, price: Price) -> Result<&mut PriceLevel, BookError> {
+        match side {
+            Side::Ask => self.asks.get_mut(&price).ok_or_else(|| BookError::LevelNotFound(side, price)),
+            Side::Bid => self.bids.get_mut(&Reverse(price)).ok_or_else(|| BookError::LevelNotFound(side, price)),
+            Side::None => Err(BookError::EnteringSideNone),
+        }
+    }
+
+    fn delete_level(&mut self, side: Side, price: Price) -> Result<PriceLevel, BookError> {
+        match side {
+            Side::Ask => self.asks.remove(&price).ok_or_else(|| BookError::LevelNotFound(side, price)),
+            Side::Bid => self.bids.remove(&Reverse(price)).ok_or_else(|| BookError::LevelNotFound(side, price)),
+            Side::None => Err(BookError::EnteringSideNone),
+        }
     }
 
     fn update_last(&mut self, price: Price, qty: Quantity) {
         self.last_trade = (price, qty);
-    }
-
-    fn add(&mut self, order: Order) -> Result<(), BookError> {
-        match order.side {
-            Side::Ask => {
-                self.asks
-                    .entry(order.price)
-                    .or_default()
-                    .add(order);
-            }
-            Side::Bid => {
-                self.bids
-                    .entry(Reverse(order.price))
-                    .or_default()
-                    .add(order);
-            }
-            Side::None => return Err(BookError::EnteringSideNone),
-        }
-        if let Some(_) = self.order_refs.insert(order.id, (order.side, order.price)) {
-            return Err(BookError::DuplicateOrderId(order.id))
-        }
-
-        Ok(())
-    }
-
-    fn modify(&mut self, id: OrderId, ts: Timestamp, side: Side, price: Price, qty: Quantity) -> Result<(), BookError> {
-        let (old_side, old_price) = self.order_refs.get(&id).unwrap();
-        assert_eq!(*old_side, side, "sides dont match");
-        let level = match side {
-            Side::Ask => self.asks.get_mut(old_price).unwrap(),
-            Side::Bid => self.bids.get_mut(&Reverse(*old_price)).unwrap(),
-            Side::None => return Err(BookError::EnteringSideNone),
-        };
-        let old_idx = level.get_pos(id)?;
-        let old_order = level.orders.get(old_idx).unwrap();
-        let lost_priority = old_order.loses_priority(price, qty);
-        if lost_priority {
-            let mut order = level.remove_idx(old_idx).unwrap();
-            let level_empty = level.orders.is_empty();
-            if level_empty {
-                match side {
-                    Side::Ask => {
-                        self.asks.remove(old_price);
-                    }
-                    Side::Bid => {
-                        self.bids.remove(&Reverse(*old_price));
-                    }
-                    Side::None => return Err(BookError::EnteringSideNone),
-                }
-            }
-            order.ts = ts;
-            order.price = price;
-            order.qty = qty;
-            let level = match side {
-                Side::Ask => self.asks.entry(price).or_default(),
-                Side::Bid => self.bids.entry(Reverse(price)).or_default(),
-                Side::None => return Err(BookError::EnteringSideNone),
-            };
-            level.add(order);
-        } else {
-            level.modify_idx(old_idx, qty).unwrap();
-        }
-        self.order_refs.get_mut(&id).unwrap().1 = price;
-        Ok(())
-    }
-
-    fn cancel(&mut self, id: OrderId) -> Result<Order, BookError> {
-        let (old_side, old_price) = self.order_refs.get(&id).ok_or_else(|| BookError::OrderIdNotFound(id))?;
-        let level = match old_side {
-            Side::Ask => self.asks.get_mut(old_price),
-            Side::Bid => self.bids.get_mut(&Reverse(*old_price)),
-            Side::None => return Err(BookError::EnteringSideNone),
-        }
-        .unwrap();
-
-        let order = level.remove(id)?;
-
-        if level.orders.is_empty() {
-            match old_side {
-                Side::Ask => self.asks.remove(old_price),
-                Side::Bid => self.bids.remove(&Reverse(*old_price)),
-                Side::None => return Err(BookError::EnteringSideNone),
-            };
-        }
-        self.order_refs
-            .remove(&id)
-            .ok_or_else(|| BookError::OrderIdNotFound(id))?;
-        Ok(order)
     }
 
     fn clear(&mut self) {

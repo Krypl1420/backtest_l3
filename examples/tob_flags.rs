@@ -4,9 +4,7 @@ use dbn::{
 };
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    dbg!(&args);
-    let mut data = Decoder::from_zstd_file(&args[1]).expect("file not found");
+    let mut data = Decoder::from_zstd_file("test_data/glbx-mdp3-20260701.mbo.dbn.zst").expect("file not found");
 
     let mut tob_flags = 0;
     while let Some(msg) = data.decode_record::<MboMsg>().unwrap() {
@@ -17,4 +15,5 @@ fn main() {
             }
         }
     }
+    println!("{tob_flags}");
 }
