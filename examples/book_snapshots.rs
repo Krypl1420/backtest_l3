@@ -12,10 +12,14 @@ fn main() {
 
     let mut i = 0;
     while let Some(msg) = data.decode_record::<MboMsg>().unwrap() {
-        book.apply_event(&msg).unwrap();
+        book.apply_event(&msg);
 
         if i % 10_000_000 == 0 {
             println!("{}", book);
+            println!("{:?}", book.asks.iter().next());
+            println!("{:?}", book.asks.iter().next());
+            println!("{:?}", book.bids.iter().next());
+            println!("{:?}", book.bids.iter().next());
         }
 
         if i == 100_000_000 {

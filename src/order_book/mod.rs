@@ -1,46 +1,17 @@
 pub mod order;
 use crate::order_book::order::Priority;
 pub use crate::types::{OrderId, Price, Quantity, Side, Timestamp};
-use dbn::{BidAskPair, MboMsg, Mbp10Msg};
+use dbn::{Action, BidAskPair, MboMsg, UNDEF_PRICE};
 pub use order::Order;
 
-use std::cmp::Reverse;
-use std::collections::btree_map::Entry;
+use std::cmp::{Ordering};
+use std::collections::btree_map::Entry as BEntry;
+use std::collections::hash_map::{Entry};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Write};
-use std::mem::replace;
+use std::{panic};
 
 const DISPLAY_WIDTH: usize = 80;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BookError {
-    OrderIdNotFound(OrderId),
-    OrderIndexNotFound(usize),
-    DuplicateOrderId(OrderId),
-    EnteringSideNone,
-    LevelNotFound(Side, Price)
-}
-
-impl std::fmt::Display for BookError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::OrderIdNotFound(id) => write!(f, "order {id:?} not found"),
-            Self::OrderIndexNotFound(pos) => write!(f, "order at index {pos} not found"),
-            Self::DuplicateOrderId(id) => write!(f, "duplicate order id {id:?}"),
-            Self::EnteringSideNone => write!(f, "entering side is none"),
-            Self::LevelNotFound(side, price) => write!(f, "price level side: {side:?} price: {price:?} not found")
-        }
-    }
-}
-
-impl std::error::Error for BookError {}
-
-#[derive(Debug)]
-
-enum HalfBook {
-    Ask(BTreeMap<Price, PriceLevel>),
-    Bid(BTreeMap<Reverse<Price>, PriceLevel>),
-}
 
 #[derive(Debug)]
 pub struct PriceLevel {
@@ -56,54 +27,16 @@ impl PriceLevel {
         return self.orders.push(order);
     }
 
-    pub fn find(&self, id: OrderId) -> Result<&Order, BookError> {
-        return self.orders.iter().find(|o| o.id == id).ok_or_else(|| BookError::OrderIdNotFound(id));
+    pub fn find(&self, id: OrderId) -> Option<&Order> {
+        return self.orders.iter().find(|o| o.id == id);
     }
 
-    pub fn find_mut(&mut self, id: OrderId) -> Result<&mut Order, BookError> {
-        return self.orders.iter_mut().find(|o| o.id == id).ok_or_else(|| BookError::OrderIdNotFound(id));
+    pub fn find_mut(&mut self, id: OrderId) -> Option<&mut Order> {
+        return self.orders.iter_mut().find(|o| o.id == id);
     }
 
-    pub fn get_pos(&self, id: OrderId) -> Result<usize, BookError> {
-        return self.orders.iter().position(|o| o.id == id).ok_or_else(|| BookError::OrderIdNotFound(id));
-    }
-
-    pub fn modify(&mut self, id: OrderId, new_qty: Quantity) -> Result<Order, BookError> {
-        let old_order = self.find_mut(id)?;
-        let new_order = Order{
-            qty: new_qty,
-            ..*old_order
-        };
-        let old_order  = replace(old_order, new_order);
-        return Ok(old_order)
-    }
-
-    pub fn modify_idx(
-        &mut self,
-        order_pos: usize,
-        new_qty: Quantity,
-    ) -> Result<Order, BookError> {
-        let old_order = self.orders.get_mut(order_pos).ok_or_else(|| BookError::OrderIndexNotFound(order_pos))?;
-        let new_order = Order{
-            qty: new_qty,
-            ..*old_order
-        };
-        let old_order = replace(old_order, new_order);
-        return Ok(old_order)
-    }
-
-    pub fn remove(&mut self, id: OrderId) -> Result<Order, BookError> {
-        let pos = self.orders.iter().position(|o| o.id == id).ok_or_else(|| BookError::OrderIdNotFound(id))?;
-        let order = self.orders.remove(pos);
-        return Ok(order);
-    }
-
-    pub fn remove_idx(&mut self, pos: usize) -> Result<Order, BookError> {
-        if pos >= self.orders.len() {
-            return Err(BookError::OrderIndexNotFound(pos));
-        }
-        let order = self.orders.remove(pos);
-        return Ok(order);
+    pub fn get_pos(&self, id: OrderId) -> Option<usize> {
+        return self.orders.iter().position(|o| o.id == id);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,9 +54,10 @@ impl Default for PriceLevel {
     }
 }
 
+#[derive(Debug)]
 pub struct OrderBook {
     pub asks: BTreeMap<Price, PriceLevel>,
-    pub bids: BTreeMap<Reverse<Price>, PriceLevel>,
+    pub bids: BTreeMap<Price, PriceLevel>,
     pub order_refs: HashMap<OrderId, (Side, Price)>,
     pub last_trade: (Price, Quantity),
     pub last_msg: MboMsg,
@@ -135,83 +69,117 @@ impl OrderBook {
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
             order_refs: HashMap::new(),
-            last_trade: (i64::MAX, u32::MAX),
+            last_trade: (Price::MAX, Quantity::MAX),
             last_msg: MboMsg::default(),
         }
     }
 
-    pub fn apply_event(&mut self, mbo: &MboMsg) -> Result<Option<Order>, BookError> {
-        todo!()
-    }
-
-
-    fn add(&mut self, mbo: &MboMsg) -> Result<(), BookError> {
-        if mbo.flags.is_tob() {
-            match mbo.side().unwrap() {
-                Side::Ask => {
-                    self.asks.clear();
-                    self.asks.entry(mbo.price).or_default().add(Order::from_event(mbo));
-                },
-                Side::Bid => {
-                    self.bids.clear();
-                    self.bids.entry(Reverse(mbo.price)).or_default().add(Order::from_event(mbo));
-                },
-                Side::None => return Err(BookError::EnteringSideNone),
-            };
-        } else {
-            let old_ref = self.order_refs.insert(mbo.order_id, (mbo.side().unwrap(), mbo.price));
-            assert_eq!(old_ref, None); // this assertion is bulshit
-            let level = self.get_mut_level(mbo.side().unwrap(), mbo.price)?;
-            level.orders.push(Order::from_event(mbo));
+    pub fn apply_event(&mut self, mbo: &MboMsg) -> Option<Order> {
+        self.last_msg = *mbo;
+        if mbo.price == UNDEF_PRICE && mbo.flags.is_tob() {
+            self.get_half_book(mbo.side().unwrap()).clear();
         }
-        Ok(())
+        match mbo.action().unwrap() {
+            Action::Add => self.add(mbo),
+            Action::Modify => self.modify(mbo),
+            Action::Cancel => return self.cancel(mbo),
+            Action::Clear => self.clear(),
+            Action::Trade => {
+                if mbo.side().unwrap() != Side::None {
+                    self.update_last(mbo.price, mbo.size)
+                }
+            },
+            Action::Fill => (),
+            Action::None => (),
+        };
+        None
     }
 
-    fn modify(&mut self, mbo: &MboMsg) -> Result<(), BookError> {
+    fn add(&mut self, mbo: &MboMsg) {
+        if mbo.flags.is_tob() {
+            let levels = self.get_half_book(mbo.side().unwrap());
+            levels.clear();
+            let order = Order::from_event(mbo);
+            levels.entry(mbo.price).or_default().add(order);
+            self.order_refs.clear();
+        } else {
+            let Entry::Vacant(entry) = self.order_refs.entry(mbo.order_id) else {
+                panic!("duplicate id");
+            };
+            entry.insert((mbo.side().unwrap(), mbo.price));
+            let order = Order::from_event(mbo);
+            let level = self
+                .get_half_book(mbo.side().unwrap())
+                .entry(mbo.price)
+                .or_default();
+            level.add(order);
+        }
+        self.order_refs.insert(mbo.order_id, (mbo.side().unwrap(), mbo.price));
+    }
+
+    fn modify(&mut self, mbo: &MboMsg) {
         let Some(&(order_side, order_price)) = self.order_refs.get(&mbo.order_id) else {
             return self.add(&mbo);
         };
         assert_eq!(order_side, mbo.side().unwrap());
-        let level = self.get_mut_level(order_side, order_price).unwrap();
-        let order_idx = level.orders.iter().position(|o| o.id == mbo.order_id).ok_or_else(|| BookError::OrderIdNotFound(mbo.order_id))?;
+        let levels = self.get_half_book(order_side);
+        let level = levels.get_mut(&order_price).unwrap();
+        let order_idx = level.get_pos(mbo.order_id).unwrap();
         let order = level.orders.get_mut(order_idx).unwrap();
+        let priority = order.loses_priority(mbo.price, mbo.size);
         order.price = mbo.price;
         order.qty = mbo.size;
 
-        match order.loses_priority(mbo.price, mbo.size) {
-            Priority::LostPrice => {
-                let order = level.remove_idx(order_idx).unwrap();
-                if level.is_empty() {
-                    self.delete_level(order_side, order_price).unwrap();
-                }
-                let new_level = self.get_mut_level(mbo.side().unwrap(), mbo.price)?;
-                new_level.add(order);
-            }
+        match priority {
+            Priority::Kept => (),
             Priority::LostSize => {
-                level.modify_idx(order_idx, mbo.size).unwrap();
+                let order = level.orders.remove(order_idx);
+                level.add(order);
             },
-            Priority::Kept => ()
+            Priority::LostPrice => {
+                let BEntry::Occupied(mut entry)= levels.entry(order_price) else {
+                    panic!("level not found");
+                };
+                let level = entry.get_mut();
+                let order = level.orders.remove(order_idx);
+                if level.is_empty() {
+                    entry.remove();
+                    assert!(!levels.contains_key(&order_price));
+                }
+                levels.entry(mbo.price).or_default().add(order);
+                self.order_refs.insert(mbo.order_id, (order_side, mbo.price));
+            }
         }
-        Ok(())
     }
 
-    fn cancel(&mut self, mbo: &MboMsg) -> Result<Order, BookError> {
-        todo!()
+    fn cancel(&mut self, mbo: &MboMsg) -> Option<Order> {
+        let levels = self.get_half_book(mbo.side().unwrap());
+        let level = levels.get_mut(&mbo.price).unwrap();
+        let order_idx = level.get_pos(mbo.order_id).unwrap();
+        let order = level.find_mut(mbo.order_id).unwrap();
+        let old_order = match order.qty.cmp(&mbo.size) {
+            Ordering::Less => panic!("canceling bigger size than availible"),
+            Ordering::Equal => {
+                let order = level.orders.remove(order_idx);
+                if level.is_empty() {
+                    levels.remove(&mbo.price).unwrap();
+                }
+                self.order_refs.remove(&mbo.order_id);
+                Some(order)
+            }
+            Ordering::Greater => {
+                order.qty -= mbo.size;
+                None
+            },
+        };
+        old_order
     }
 
-    fn get_mut_level(&mut self, side: Side, price: Price) -> Result<&mut PriceLevel, BookError> {
+    fn get_half_book(&mut self, side: Side) -> &mut BTreeMap<Price, PriceLevel> {
         match side {
-            Side::Ask => self.asks.get_mut(&price).ok_or_else(|| BookError::LevelNotFound(side, price)),
-            Side::Bid => self.bids.get_mut(&Reverse(price)).ok_or_else(|| BookError::LevelNotFound(side, price)),
-            Side::None => Err(BookError::EnteringSideNone),
-        }
-    }
-
-    fn delete_level(&mut self, side: Side, price: Price) -> Result<PriceLevel, BookError> {
-        match side {
-            Side::Ask => self.asks.remove(&price).ok_or_else(|| BookError::LevelNotFound(side, price)),
-            Side::Bid => self.bids.remove(&Reverse(price)).ok_or_else(|| BookError::LevelNotFound(side, price)),
-            Side::None => Err(BookError::EnteringSideNone),
+            Side::Ask => &mut self.asks,
+            Side::Bid => &mut self.bids,
+            Side::None => unreachable!(),
         }
     }
 
@@ -234,7 +202,7 @@ impl OrderBook {
             writeln!(
                 out,
                 "{:<DISPLAY_WIDTH$}",
-                format!("ASKS | price: {} | qty: {}", price, level.total_qty())
+                format!("ASKS | price: {} | qty: {} | orders: {}", price, level.total_qty(), level.orders.len())
             )
             .unwrap();
         }
@@ -249,11 +217,11 @@ impl OrderBook {
         )
         .unwrap();
         writeln!(out, "{:-^DISPLAY_WIDTH$}", "").unwrap();
-        for (Reverse(price), level) in self.bids.iter().take(n) {
+        for (price, level) in self.bids.iter().rev().take(n) {
             writeln!(
                 out,
                 "{:<DISPLAY_WIDTH$}",
-                format!("BIDS | price: {} | qty: {}", price, level.total_qty())
+                format!("BIDS | price: {} | qty: {} | orders: {}", price, level.total_qty(), level.orders.len())
             )
             .unwrap();
         }
@@ -262,39 +230,27 @@ impl OrderBook {
         return out;
     }
 
-    pub fn mbp_10(&self) -> Mbp10Msg {
-        let last = &self.last_msg;
-        let mut levels: [BidAskPair; 10] = Default::default();
-        let mut bids = self.bids.iter();
+    pub fn get_n_levels(&self, n: usize) -> Vec<BidAskPair> {
+        let mut levels: Vec<BidAskPair> = Vec::with_capacity(n);
+        let mut bids = self.bids.iter().rev();
         let mut asks = self.asks.iter();
 
-        for lvl in levels.iter_mut() {
-            let bid_entry = bids.next().unwrap();
-            let ask_entry = asks.next().unwrap();
-            *lvl = BidAskPair {
-                bid_px: bid_entry.0.0,
-                ask_px: *ask_entry.0,
-                bid_sz: bid_entry.1.total_qty(),
-                ask_sz: ask_entry.1.total_qty(),
-                bid_ct: bid_entry.1.orders.len() as u32,
-                ask_ct: ask_entry.1.orders.len() as u32,
+        for _ in 0..n {
+            let level = levels.push_mut(BidAskPair::default());
+            if let Some(ask_level) = asks.next() {
+                level.ask_px = *ask_level.0;
+                level.ask_sz = ask_level.1.total_qty();
+                level.ask_ct = ask_level.1.orders.len() as _;
             }
-        }
-
-        Mbp10Msg {
-            hd: last.hd,
-            price: last.price,
-            size: last.size,
-            action: last.action,
-            side: last.side,
-            flags: last.flags,
-            depth: u8::MAX,
-            ts_recv: last.ts_recv,
-            ts_in_delta: last.ts_in_delta,
-            sequence: last.sequence,
-            levels: levels,
-        }
+            if let Some(bid_level) = bids.next() {
+                level.bid_px = *bid_level.0;
+                level.bid_sz = bid_level.1.total_qty();
+                level.bid_ct = bid_level.1.orders.len() as _;
+            }
+        };
+        return levels
     }
+
 }
 
 impl Display for OrderBook {
@@ -304,177 +260,225 @@ impl Display for OrderBook {
     }
 }
 
-#[cfg(test)]
-mod price_level_tests {
-    use super::*;
-
-    #[test]
-    fn empty_level_has_no_orders() {
-        let mut level = PriceLevel::new();
-
-        assert!(level.orders.is_empty());
-        assert_eq!(level.find(1), Err(BookError::OrderIdNotFound(1)));
-        assert_eq!(level.find_mut(1), Err(BookError::OrderIdNotFound(1)));
-        assert_eq!(level.get_pos(1), Err(BookError::OrderIdNotFound(1)));
-    }
-
-    #[test]
-    fn added_orders_are_findable_in_insertion_order() {
-        let mut level = PriceLevel::new();
-        let orders = [
-            Order::new(1, 100, Side::Ask, 1_000, 10),
-            Order::new(2, 100, Side::Ask, 2_000, 10),
-            Order::new(3, 100, Side::Ask, 3_000, 10),
-        ];
-
-        for order in orders {
-            level.add(order);
-        }
-
-        assert_eq!(level.orders.as_slice(), orders.as_slice());
-
-        for (pos, order) in orders.iter().enumerate() {
-            assert_eq!(level.find(order.id), Ok(order));
-            assert_eq!(level.get_pos(order.id), Ok(pos));
-        }
-
-        assert_eq!(level.find(99), Err(BookError::OrderIdNotFound(99)));
-        assert_eq!(level.find_mut(99), Err(BookError::OrderIdNotFound(99)));
-        assert_eq!(level.get_pos(99), Err(BookError::OrderIdNotFound(99)));
-    }
-
-    #[test]
-    fn mutable_lookup_updates_only_the_matching_order() {
-        let mut level = PriceLevel::new();
-        let first = Order::new(1, 100, Side::Ask, 1_000, 10);
-        let second = Order::new(2, 100, Side::Ask, 1_000, 10);
-
-        level.add(first);
-        level.add(second);
-
-        level.find_mut(2).expect("order 2 should exist").qty = 5;
-
-        assert_eq!(level.find(1), Ok(&first));
-        assert_eq!(
-            level.find(2),
-            Ok(&Order { qty: 5, ..second }),
-        );
-        assert_eq!(level.get_pos(2), Ok(1));
-    }
-
-    #[test]
-    fn correct_total_qty() {
-        let mut level = PriceLevel::new();
-        let order1 = Order::new(1, 100, Side::Ask, 1_000, 200);
-        let order2 = Order::new(2, 100, Side::Ask, 1_000, 50);
-
-        level.add(order1);
-        level.add(order2);
-
-        assert_eq!(level.total_qty(), 250);
-        assert_eq!(level.orders.len(), 2);
-
-        let original_order = level.modify(1, 100).expect("order 1 should be modified");
-        assert_eq!(original_order, order1);
-
-        assert_eq!(level.total_qty(), 150);
-        assert_eq!(level.orders.len(), 2);
-
-        level.remove(2).expect("order 2 should be removed");
-
-        assert_eq!(level.total_qty(), 100);
-        assert_eq!(level.orders.len(), 1);
-    }
-}
-
 
 #[cfg(test)]
 mod book_tests {
-    use dbn::{FlagSet, MboMsg, RecordHeader, rtype};
+    use super::*;
+    use dbn::{RecordHeader, rtype};
 
-    use crate::{
-        order_book::{Order, OrderBook},
-        types::{Action, OrderId, Price, Quantity, Side},
-    };
-
-    fn add(order_id: OrderId, action: Action, side: Side, price: Price, size: Quantity) -> MboMsg {
+    fn event(action: Action, order_id: OrderId, price: Price, side: Side, size: Quantity) -> MboMsg {
+        let mut hd = RecordHeader::default::<MboMsg>(rtype::MBO);
+        hd.ts_event = 42;
         MboMsg {
-            hd: RecordHeader::default::<MboMsg>(rtype::MBO),
+            hd,
             order_id,
             price,
             size,
-            flags: FlagSet::default(),
-            channel_id: 0,
             action: action as _,
             side: side as _,
-            ts_recv: 0,
-            ts_in_delta: 0,
-            sequence: 0,
-        }
-    }
-
-    fn modify(id: OrderId, side: Side, price: Price, qty: Quantity) -> MboMsg {
-        MboMsg {
-            hd: RecordHeader::default::<MboMsg>(rtype::MBO),
-            order_id: id,
-            side: side as _,
-            price,
-            size: qty,
-            flags: FlagSet::default(),
-            channel_id: 0,
-            action: Action::Modify as _,
-            ts_recv: 0,
-            ts_in_delta: 0,
-            sequence: 0,
-        }
-    }
-
-    fn cancel(id: OrderId, side: Side) -> MboMsg {
-        MboMsg {
-            hd: RecordHeader::default::<MboMsg>(rtype::MBO),
-            order_id: id,
-            side: side as _,
-            price: 0,
-            size: 0,
-            flags: FlagSet::default(),
-            channel_id: 0,
-            action: Action::Cancel as _,
-            ts_recv: 0,
-            ts_in_delta: 0,
-            sequence: 0,
+            ..MboMsg::default()
         }
     }
 
     #[test]
-    fn level_is_droped_if_no_order_left() {
-        let mut book = OrderBook::new();
-        const ORDER_ID: OrderId = 0;
-        const PRICE: Price = 1000;
-        const QTY: Quantity = 10;
-        let add_event = add(ORDER_ID, Action::Add, Side::Ask, PRICE, QTY);
-        let cancel_event = cancel(ORDER_ID, Side::Ask);
-        book.apply_event(&add_event).unwrap();
+    fn new_book_values() {
+        let book = OrderBook::new();
 
-        let price_level = book.asks.get(&PRICE).unwrap();
-        assert_eq!(book.asks.len(), 1);
-        assert_eq!(price_level.orders.len(), 1);
-        assert_eq!(
-            price_level.orders.get(0).copied(),
-            Some(Order::from_event(&add_event))
-        );
-
-        book.apply_event(&cancel_event).unwrap();
-
-        assert_eq!(book.asks.len(), 0);
+        assert!(book.bids.is_empty());
+        assert!(book.asks.is_empty());
+        assert!(book.order_refs.is_empty());
+        assert_eq!(book.last_trade, (Price::MAX, Quantity::MAX));
     }
 
-    // #[test]
-    // fn book_add() {
-    //     let mut book = OrderBook::new();
-    //     book.apply_event(&add(0, Action::Add, Side::Ask, 1000, 10)).unwrap();
-    //     book.apply_event(&add(0, Action::Add, Side::Ask, 1000, 10)).unwrap();
-    //     assert_eq!(book.asks.len(), 1);
-    //     assert_eq!(book.bids.len(), 0);
-    //     assert_eq!(book.order_refs.len(), 1);
-    // }
+    #[test]
+    fn add_creates_orders_on_both_sides() {
+        let mut book = OrderBook::new();
+        let bid = event(Action::Add, 1, 100, Side::Bid, 10);
+        let ask = event(Action::Add, 2, 101, Side::Ask, 20);
+
+        assert_eq!(book.apply_event(&bid), None);
+        assert_eq!(book.apply_event(&ask), None);
+
+        assert_eq!(book.bids[&100].orders, vec![Order::from_event(&bid)]);
+        assert_eq!(book.asks[&101].orders, vec![Order::from_event(&ask)]);
+        assert_eq!(book.order_refs.len(), 2);
+        assert_eq!(book.order_refs[&1], (Side::Bid, 100));
+        assert_eq!(book.order_refs[&2], (Side::Ask, 101));
+        assert_eq!(book.last_msg.order_id, ask.order_id);
+        assert_eq!(book.last_msg.hd.ts_event, ask.hd.ts_event);
+    }
+
+    #[test]
+    fn orders_at_same_price_keep_insertion_order_and_sum_quantity() {
+        let mut book = OrderBook::new();
+        let first = event(Action::Add, 1, 100, Side::Bid, 10);
+        let second = event(Action::Add, 2, 100, Side::Bid, 20);
+        book.apply_event(&first);
+        book.apply_event(&second);
+
+        assert_eq!(book.bids.len(), 1);
+        assert_eq!(book.bids[&100].total_qty(), 30);
+        assert_eq!(
+            book.bids[&100].orders,
+            vec![Order::from_event(&first), Order::from_event(&second)]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate id")]
+    fn adding_duplicate_order_id_panics() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+        book.apply_event(&event(Action::Add, 1, 101, Side::Ask, 20));
+    }
+
+    #[test]
+    fn reducing_quantity_keeps_queue_priority() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+        book.apply_event(&event(Action::Add, 2, 100, Side::Bid, 20));
+
+        assert_eq!(
+            book.apply_event(&event(Action::Modify, 1, 100, Side::Bid, 5)),
+            None
+        );
+
+        let level = &book.bids[&100];
+        assert_eq!(level.orders[0].id, 1);
+        assert_eq!(level.orders[0].qty, 5);
+        assert_eq!(level.orders[1].id, 2);
+        assert_eq!(level.total_qty(), 25);
+        assert_eq!(book.order_refs[&1], (Side::Bid, 100));
+    }
+
+    #[test]
+    fn increasing_quantity_moves_order_to_back_of_queue() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+        book.apply_event(&event(Action::Add, 2, 100, Side::Bid, 20));
+
+        book.apply_event(&event(Action::Modify, 1, 100, Side::Bid, 15));
+
+        let level = &book.bids[&100];
+        assert_eq!(level.orders[0].id, 2);
+        assert_eq!(level.orders[1].id, 1);
+        assert_eq!(level.orders[1].qty, 15);
+        assert_eq!(level.total_qty(), 35);
+    }
+
+    #[test]
+    fn changing_price_moves_order_and_removes_empty_level() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 101, Side::Ask, 10));
+        book.apply_event(&event(Action::Add, 2, 102, Side::Ask, 20));
+
+        book.apply_event(&event(Action::Modify, 1, 102, Side::Ask, 10));
+
+        assert!(!book.asks.contains_key(&101));
+        let level = &book.asks[&102];
+        assert_eq!(level.orders.len(), 2);
+        assert_eq!(level.orders[0].id, 2);
+        assert_eq!(level.orders[1].id, 1);
+        assert_eq!(level.orders[1].price, 102);
+        assert_eq!(book.order_refs[&1], (Side::Ask, 102));
+    }
+
+    #[test]
+    fn modifying_unknown_order_adds_it() {
+        let mut book = OrderBook::new();
+        let msg = event(Action::Modify, 1, 101, Side::Ask, 10);
+
+        assert_eq!(book.apply_event(&msg), None);
+
+        assert_eq!(book.asks[&101].orders, vec![Order::from_event(&msg)]);
+        assert_eq!(book.order_refs[&1], (Side::Ask, 101));
+    }
+
+    #[test]
+    fn partial_cancel_reduces_quantity_without_removing_order() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+
+        assert_eq!(
+            book.apply_event(&event(Action::Cancel, 1, 100, Side::Bid, 4)),
+            None
+        );
+
+        assert_eq!(book.bids[&100].orders.len(), 1);
+        assert_eq!(book.bids[&100].orders[0].qty, 6);
+        assert_eq!(book.order_refs[&1], (Side::Bid, 100));
+    }
+
+    #[test]
+    fn full_cancel_returns_order_and_removes_empty_level() {
+        let mut book = OrderBook::new();
+        let msg = event(Action::Add, 1, 101, Side::Ask, 10);
+        book.apply_event(&msg);
+
+        let removed = book.apply_event(&event(Action::Cancel, 1, 101, Side::Ask, 10));
+
+        assert_eq!(removed, Some(Order::from_event(&msg)));
+        assert!(book.asks.is_empty());
+        assert!(book.order_refs.is_empty());
+    }
+
+    #[test]
+    fn full_cancel_at_shared_level_removes_only_target_order_and_reference() {
+        let mut book = OrderBook::new();
+        let first = event(Action::Add, 1, 100, Side::Bid, 10);
+        let second = event(Action::Add, 2, 100, Side::Bid, 20);
+        book.apply_event(&first);
+        book.apply_event(&second);
+
+        let removed = book.apply_event(&event(Action::Cancel, 1, 100, Side::Bid, 10));
+
+        assert_eq!(removed, Some(Order::from_event(&first)));
+        assert_eq!(book.bids[&100].orders, vec![Order::from_event(&second)]);
+        assert!(!book.order_refs.contains_key(&1), "{book}, {:?}", book.order_refs);
+        assert_eq!(book.order_refs[&2], (Side::Bid, 100));
+    }
+
+    #[test]
+    #[should_panic(expected = "canceling bigger size than availible")]
+    fn canceling_more_than_available_panics() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+        book.apply_event(&event(Action::Cancel, 1, 100, Side::Bid, 11));
+    }
+
+    #[test]
+    fn clear_removes_both_sides_and_all_order_references() {
+        let mut book = OrderBook::new();
+        book.apply_event(&event(Action::Add, 1, 100, Side::Bid, 10));
+        book.apply_event(&event(Action::Add, 2, 101, Side::Ask, 20));
+
+        assert_eq!(
+            book.apply_event(&event(Action::Clear, 0, 0, Side::None, 0)),
+            None
+        );
+
+        assert!(book.bids.is_empty());
+        assert!(book.asks.is_empty());
+        assert!(book.order_refs.is_empty());
+    }
+
+    #[test]
+    fn trade_updates_last_trade_without_changing_resting_orders() {
+        let mut book = OrderBook::new();
+        let resting = event(Action::Add, 1, 100, Side::Bid, 10);
+        book.apply_event(&resting);
+
+        assert_eq!(
+            book.apply_event(&event(Action::Trade, 0, 101, Side::Ask, 3)),
+            None
+        );
+
+        assert_eq!(book.last_trade, (101, 3));
+        assert_eq!(book.bids[&100].orders, vec![Order::from_event(&resting)]);
+        assert!(book.asks.is_empty());
+        assert_eq!(book.order_refs.len(), 1);
+
+        book.apply_event(&event(Action::Trade, 0, 102, Side::None, 5));
+        assert_eq!(book.last_trade, (101, 3));
+    }
 }

@@ -1,6 +1,9 @@
 use dbn::MboMsg;
 
-use crate::{order_book::{Price, Quantity, Side, Timestamp}, types::OrderId};
+use crate::{
+    order_book::{Price, Quantity, Side, Timestamp},
+    types::OrderId,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Order {
@@ -11,10 +14,11 @@ pub struct Order {
     pub qty: Quantity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Priority {
     Kept,
     LostPrice,
-    LostSize
+    LostSize,
 }
 
 impl Order {
@@ -40,7 +44,7 @@ impl Order {
     pub fn loses_priority(&self, new_price: Price, new_qty: Quantity) -> Priority {
         if self.price != new_price {
             return Priority::LostPrice;
-        } else if new_qty > self.qty {
+        } if new_qty > self.qty {
             return Priority::LostSize;
         }
         Priority::Kept
@@ -48,23 +52,23 @@ impl Order {
 }
 
 #[cfg(test)]
-mod tests {
+mod order_tests {
     use super::*;
 
     #[test]
     fn unchanged_or_reduced_quantity_keeps_priority() {
         let order = Order::new(1, 100, Side::Bid, 1_000, 10);
 
-        assert!(!order.loses_priority(1_000, 10));
-        assert!(!order.loses_priority(1_000, 5));
-        assert!(!order.loses_priority(1_000, 0));
+        assert_eq!(order.loses_priority(1_000, 10), Priority::Kept);
+        assert_eq!(order.loses_priority(1_000, 5), Priority::Kept);
+        assert_eq!(order.loses_priority(1_000, 0), Priority::Kept);
     }
 
     #[test]
     fn increased_quantity_loses_priority() {
         let order = Order::new(1, 100, Side::Bid, 1_000, 10);
 
-        assert!(order.loses_priority(1_000, 11));
+        assert_eq!(order.loses_priority(1_000, 11), Priority::LostSize);
     }
 
     #[test]
@@ -73,7 +77,7 @@ mod tests {
 
         for price in [999, 1_001] {
             for qty in [5, 10, 11] {
-                assert!(order.loses_priority(price, qty));
+                assert_eq!(order.loses_priority(price, qty), Priority::LostPrice);
             }
         }
     }

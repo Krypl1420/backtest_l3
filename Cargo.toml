@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dbn = "0.71.0"
+dbn = {version="0.71.0", features = ["trivial_copy"]}
 parquet = "60.0.0"
