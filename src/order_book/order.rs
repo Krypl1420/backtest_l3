@@ -1,9 +1,6 @@
 use dbn::MboMsg;
 
-use crate::{
-    order_book::{Price, Quantity, Side, Timestamp},
-    types::OrderId,
-};
+use crate::order_book::{Price, Quantity, Side, Timestamp, types::OrderId};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Order {
@@ -44,7 +41,8 @@ impl Order {
     pub fn loses_priority(&self, new_price: Price, new_qty: Quantity) -> Priority {
         if self.price != new_price {
             return Priority::LostPrice;
-        } if new_qty > self.qty {
+        }
+        if new_qty > self.qty {
             return Priority::LostSize;
         }
         Priority::Kept

@@ -1,15 +1,16 @@
 pub mod order;
+pub mod types;
 use crate::order_book::order::Priority;
-pub use crate::types::{OrderId, Price, Quantity, Side, Timestamp};
 use dbn::{Action, BidAskPair, MboMsg, UNDEF_PRICE};
 pub use order::Order;
+pub use types::{OrderId, Price, Quantity, Side, Timestamp};
 
-use std::cmp::{Ordering};
+use std::cmp::Ordering;
 use std::collections::btree_map::Entry as BEntry;
-use std::collections::hash_map::{Entry};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Write};
-use std::{panic};
+use std::panic;
 
 const DISPLAY_WIDTH: usize = 80;
 
@@ -58,7 +59,7 @@ impl Default for PriceLevel {
 pub struct OrderBook {
     pub asks: BTreeMap<Price, PriceLevel>,
     pub bids: BTreeMap<Price, PriceLevel>,
-    pub order_refs: HashMap<OrderId, (Side, Price)>,
+    order_refs: HashMap<OrderId, (Side, Price)>,
     pub last_trade: (Price, Quantity),
     pub last_msg: MboMsg,
 }
@@ -88,7 +89,7 @@ impl OrderBook {
                 if mbo.side().unwrap() != Side::None {
                     self.update_last(mbo.price, mbo.size)
                 }
-            },
+            }
             Action::Fill => (),
             Action::None => (),
         };
@@ -114,7 +115,8 @@ impl OrderBook {
                 .or_default();
             level.add(order);
         }
-        self.order_refs.insert(mbo.order_id, (mbo.side().unwrap(), mbo.price));
+        self.order_refs
+            .insert(mbo.order_id, (mbo.side().unwrap(), mbo.price));
     }
 
     fn modify(&mut self, mbo: &MboMsg) {
@@ -135,9 +137,9 @@ impl OrderBook {
             Priority::LostSize => {
                 let order = level.orders.remove(order_idx);
                 level.add(order);
-            },
+            }
             Priority::LostPrice => {
-                let BEntry::Occupied(mut entry)= levels.entry(order_price) else {
+                let BEntry::Occupied(mut entry) = levels.entry(order_price) else {
                     panic!("level not found");
                 };
                 let level = entry.get_mut();
@@ -147,7 +149,8 @@ impl OrderBook {
                     assert!(!levels.contains_key(&order_price));
                 }
                 levels.entry(mbo.price).or_default().add(order);
-                self.order_refs.insert(mbo.order_id, (order_side, mbo.price));
+                self.order_refs
+                    .insert(mbo.order_id, (order_side, mbo.price));
             }
         }
     }
@@ -170,7 +173,7 @@ impl OrderBook {
             Ordering::Greater => {
                 order.qty -= mbo.size;
                 None
-            },
+            }
         };
         old_order
     }
@@ -202,7 +205,12 @@ impl OrderBook {
             writeln!(
                 out,
                 "{:<DISPLAY_WIDTH$}",
-                format!("ASKS | price: {} | qty: {} | orders: {}", price, level.total_qty(), level.orders.len())
+                format!(
+                    "ASKS | price: {} | qty: {} | orders: {}",
+                    price,
+                    level.total_qty(),
+                    level.orders.len()
+                )
             )
             .unwrap();
         }
@@ -221,7 +229,12 @@ impl OrderBook {
             writeln!(
                 out,
                 "{:<DISPLAY_WIDTH$}",
-                format!("BIDS | price: {} | qty: {} | orders: {}", price, level.total_qty(), level.orders.len())
+                format!(
+                    "BIDS | price: {} | qty: {} | orders: {}",
+                    price,
+                    level.total_qty(),
+                    level.orders.len()
+                )
             )
             .unwrap();
         }
@@ -247,10 +260,9 @@ impl OrderBook {
                 level.bid_sz = bid_level.1.total_qty();
                 level.bid_ct = bid_level.1.orders.len() as _;
             }
-        };
-        return levels
+        }
+        return levels;
     }
-
 }
 
 impl Display for OrderBook {
@@ -260,13 +272,18 @@ impl Display for OrderBook {
     }
 }
 
-
 #[cfg(test)]
 mod book_tests {
     use super::*;
     use dbn::{RecordHeader, rtype};
 
-    fn event(action: Action, order_id: OrderId, price: Price, side: Side, size: Quantity) -> MboMsg {
+    fn event(
+        action: Action,
+        order_id: OrderId,
+        price: Price,
+        side: Side,
+        size: Quantity,
+    ) -> MboMsg {
         let mut hd = RecordHeader::default::<MboMsg>(rtype::MBO);
         hd.ts_event = 42;
         MboMsg {
@@ -434,7 +451,11 @@ mod book_tests {
 
         assert_eq!(removed, Some(Order::from_event(&first)));
         assert_eq!(book.bids[&100].orders, vec![Order::from_event(&second)]);
-        assert!(!book.order_refs.contains_key(&1), "{book}, {:?}", book.order_refs);
+        assert!(
+            !book.order_refs.contains_key(&1),
+            "{book}, {:?}",
+            book.order_refs
+        );
         assert_eq!(book.order_refs[&2], (Side::Bid, 100));
     }
 

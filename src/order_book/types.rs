@@ -1,4 +1,7 @@
-pub use dbn::{Action, FlagSet, MboMsg, Mbp10Msg, Side};
+pub use dbn::{
+    Action, FIXED_PRICE_SCALE, FlagSet, MboMsg, Mbp10Msg, Side,
+    decode::{DecodeRecordRef, dbn::Decoder},
+};
 
 pub type Price = i64;
 pub type Quantity = u32;

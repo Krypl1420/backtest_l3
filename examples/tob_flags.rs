@@ -1,5 +1,6 @@
 use dbn::{
-    Mbp10Msg, decode::{DecodeRecord, dbn::Decoder},
+    Mbp10Msg,
+    decode::{DecodeRecord, dbn::Decoder},
 };
 
 fn main() {

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 dbn = {version="0.71.0", features = ["trivial_copy"]}
 parquet = "60.0.0"
+time = "0.3.55"
