@@ -16,14 +16,10 @@ fn main() {
 
         if i % 10_000_000 == 0 {
             println!("{}", book);
-            println!("{:?}", book.asks.iter().next());
-            println!("{:?}", book.asks.iter().next());
-            println!("{:?}", book.bids.iter().next());
-            println!("{:?}", book.bids.iter().next());
-        }
-
-        if i == 100_000_000 {
-            break;
+            println!("{:?}", book.asks().iter().next());
+            println!("{:?}", book.asks().iter().next());
+            println!("{:?}", book.bids().iter().next());
+            println!("{:?}", book.bids().iter().next());
         }
 
         i += 1;

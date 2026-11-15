@@ -11,13 +11,6 @@ pub struct Order {
     pub qty: Quantity,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Priority {
-    Kept,
-    LostPrice,
-    LostSize,
-}
-
 impl Order {
     pub fn new(id: OrderId, ts: Timestamp, side: Side, price: Price, qty: Quantity) -> Self {
         Self {
@@ -47,6 +40,13 @@ impl Order {
         }
         Priority::Kept
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Priority {
+    Kept,
+    LostPrice,
+    LostSize,
 }
 
 #[cfg(test)]

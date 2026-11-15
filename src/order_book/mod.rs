@@ -57,11 +57,11 @@ impl Default for PriceLevel {
 
 #[derive(Debug)]
 pub struct OrderBook {
-    pub asks: BTreeMap<Price, PriceLevel>,
-    pub bids: BTreeMap<Price, PriceLevel>,
+    asks: BTreeMap<Price, PriceLevel>,
+    bids: BTreeMap<Price, PriceLevel>,
     order_refs: HashMap<OrderId, (Side, Price)>,
-    pub last_trade: (Price, Quantity),
-    pub last_msg: MboMsg,
+    last_trade: MboMsg,
+    last_msg: MboMsg,
 }
 
 impl OrderBook {
@@ -70,7 +70,7 @@ impl OrderBook {
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
             order_refs: HashMap::new(),
-            last_trade: (Price::MAX, Quantity::MAX),
+            last_trade: MboMsg::default(),
             last_msg: MboMsg::default(),
         }
     }
@@ -87,13 +87,54 @@ impl OrderBook {
             Action::Clear => self.clear(),
             Action::Trade => {
                 if mbo.side().unwrap() != Side::None {
-                    self.update_last(mbo.price, mbo.size)
+                    self.last_trade = *mbo;
                 }
             }
             Action::Fill => (),
             Action::None => (),
         };
         None
+    }
+
+    pub fn get_n_levels(&self, n: usize) -> Vec<BidAskPair> {
+        let mut levels: Vec<BidAskPair> = Vec::with_capacity(n);
+        let mut bids = self.bids.iter().rev();
+        let mut asks = self.asks.iter();
+
+        for _ in 0..n {
+            let level = levels.push_mut(BidAskPair::default());
+            if let Some(ask_level) = asks.next() {
+                level.ask_px = *ask_level.0;
+                level.ask_sz = ask_level.1.total_qty();
+                level.ask_ct = ask_level.1.orders.len() as _;
+            }
+            if let Some(bid_level) = bids.next() {
+                level.bid_px = *bid_level.0;
+                level.bid_sz = bid_level.1.total_qty();
+                level.bid_ct = bid_level.1.orders.len() as _;
+            }
+        }
+        return levels;
+    }
+
+    pub fn asks(&self) -> &BTreeMap<Price, PriceLevel> {
+        &self.asks
+    }
+
+    pub fn bids(&self) -> &BTreeMap<Price, PriceLevel> {
+        &self.bids
+    }
+
+    pub fn order_refs(&self) -> &HashMap<OrderId, (Side, Price)> {
+        &self.order_refs
+    }
+
+    pub fn last_trade(&self) -> MboMsg {
+        self.last_trade
+    }
+
+    pub fn last_msg(&self) -> MboMsg {
+        self.last_msg
     }
 
     fn add(&mut self, mbo: &MboMsg) {
@@ -186,10 +227,6 @@ impl OrderBook {
         }
     }
 
-    fn update_last(&mut self, price: Price, qty: Quantity) {
-        self.last_trade = (price, qty);
-    }
-
     fn clear(&mut self) {
         self.asks.clear();
         self.bids.clear();
@@ -220,7 +257,7 @@ impl OrderBook {
             "{:<DISPLAY_WIDTH$}",
             format!(
                 "LAST | price: {} | qty: {}",
-                self.last_trade.0, self.last_trade.1
+                self.last_trade.price, self.last_trade.size
             )
         )
         .unwrap();
@@ -241,27 +278,6 @@ impl OrderBook {
         writeln!(out, "{:-^DISPLAY_WIDTH$}", "").unwrap();
 
         return out;
-    }
-
-    pub fn get_n_levels(&self, n: usize) -> Vec<BidAskPair> {
-        let mut levels: Vec<BidAskPair> = Vec::with_capacity(n);
-        let mut bids = self.bids.iter().rev();
-        let mut asks = self.asks.iter();
-
-        for _ in 0..n {
-            let level = levels.push_mut(BidAskPair::default());
-            if let Some(ask_level) = asks.next() {
-                level.ask_px = *ask_level.0;
-                level.ask_sz = ask_level.1.total_qty();
-                level.ask_ct = ask_level.1.orders.len() as _;
-            }
-            if let Some(bid_level) = bids.next() {
-                level.bid_px = *bid_level.0;
-                level.bid_sz = bid_level.1.total_qty();
-                level.bid_ct = bid_level.1.orders.len() as _;
-            }
-        }
-        return levels;
     }
 }
 
@@ -304,7 +320,7 @@ mod book_tests {
         assert!(book.bids.is_empty());
         assert!(book.asks.is_empty());
         assert!(book.order_refs.is_empty());
-        assert_eq!(book.last_trade, (Price::MAX, Quantity::MAX));
+        assert_eq!(book.last_trade, MboMsg::default());
     }
 
     #[test]
@@ -487,19 +503,89 @@ mod book_tests {
     fn trade_updates_last_trade_without_changing_resting_orders() {
         let mut book = OrderBook::new();
         let resting = event(Action::Add, 1, 100, Side::Bid, 10);
+        let aggressing = event(Action::Trade, 0, 101, Side::Ask, 3);
         book.apply_event(&resting);
 
-        assert_eq!(
-            book.apply_event(&event(Action::Trade, 0, 101, Side::Ask, 3)),
-            None
-        );
+        assert_eq!(book.apply_event(&aggressing), None);
 
-        assert_eq!(book.last_trade, (101, 3));
+        assert_eq!(book.last_trade, aggressing);
         assert_eq!(book.bids[&100].orders, vec![Order::from_event(&resting)]);
         assert!(book.asks.is_empty());
         assert_eq!(book.order_refs.len(), 1);
 
         book.apply_event(&event(Action::Trade, 0, 102, Side::None, 5));
-        assert_eq!(book.last_trade, (101, 3));
+        assert_eq!(book.last_trade, aggressing);
+    }
+}
+
+#[cfg(test)]
+mod book_comparison_test {
+    use dbn::{
+        BidAskPair, MboMsg, Mbp10Msg,
+        decode::{DecodeRecord, dbn::Decoder},
+    };
+    use std::{iter::Peekable, vec::IntoIter};
+
+    use crate::OrderBook;
+
+    fn read_data() -> (Peekable<IntoIter<MboMsg>>, Peekable<IntoIter<Mbp10Msg>>) {
+        let mbo_decoder = Decoder::from_zstd_file("test_data/glbx-mdp3-20260701.mbo.dbn.zst")
+            .expect("failed to open mbo.dbn");
+        let mbp_decoder = Decoder::from_zstd_file("test_data/glbx-mdp3-20260701.mbp-10.dbn.zst")
+            .expect("failed to open mbp-10.dbn");
+
+        let mbo_data = mbo_decoder
+            .decode_records::<MboMsg>()
+            .expect("invalid mbo file")
+            .into_iter()
+            .peekable();
+        let mbp_data = mbp_decoder
+            .decode_records::<Mbp10Msg>()
+            .expect("invalid mbp file")
+            .into_iter()
+            .peekable();
+
+        (mbo_data, mbp_data)
+    }
+
+    #[test]
+    #[ignore = "slow test"]
+    fn book_mbp_comparison() {
+        let mut book = OrderBook::new();
+        let (mut mbo_data, mbp_data) = read_data();
+        let mut mbo_entry = mbo_data.next().unwrap();
+
+        while mbo_data
+            .peek()
+            .is_some_and(|entry| entry.flags.is_snapshot())
+        {
+            mbo_entry = mbo_data.next().unwrap();
+            book.apply_event(&mbo_entry);
+        }
+
+        for mbp in mbp_data {
+            if mbp.flags.is_snapshot() {
+                continue;
+            }
+
+            while !(mbp.hd.ts_event == mbo_entry.hd.ts_event
+                && mbp.ts_recv == mbo_entry.ts_recv
+                && mbp.sequence == mbo_entry.sequence
+                && mbp.flags.is_last() == mbo_entry.flags.is_last())
+            {
+                assert!(
+                    mbo_entry.hd.ts_event <= mbp.hd.ts_event,
+                    "mbo_entry: {:?}, mbp: {:?}",
+                    mbo_entry.hd.ts_event,
+                    mbp.hd.ts_event
+                );
+                let entry = mbo_data.next().unwrap();
+                book.apply_event(&entry);
+                mbo_entry = book.last_msg();
+            }
+
+            let levels: [BidAskPair; 10] = book.get_n_levels(10).try_into().unwrap();
+            assert_eq!(mbp.levels, levels);
+        }
     }
 }
