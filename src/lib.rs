@@ -1,9 +1,9 @@
 pub mod data;
-pub mod order_book;
 pub mod equity_manager;
+pub mod order_book;
 
-pub use order_book::OrderBook;
 pub use equity_manager::EquityManager;
+pub use order_book::OrderBook;
 
 use std::fmt::Debug;
 use time::OffsetDateTime;
